@@ -11,7 +11,10 @@ import androidx.wear.protolayout.material.Typography
 import androidx.wear.tiles.RequestBuilders
 import androidx.wear.tiles.TileBuilders
 import androidx.wear.tiles.TileService
-import com.furlpay.guardian.domain.GuardianResult
+import com.furlpay.guardian.sync.PortfolioSnapshot
+import com.furlpay.guardian.sync.SyncProtocol
+import com.furlpay.guardian.wear.ui.signedPct
+import com.furlpay.guardian.wear.ui.signedUsd
 import com.furlpay.guardian.wear.ui.theme.FurlPayColors
 import com.furlpay.guardian.wear.wearServices
 import com.google.common.util.concurrent.ListenableFuture
@@ -20,38 +23,41 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.guava.future
-import kotlinx.datetime.Clock
 
-/** Life Guardian: the next thing that needs you, with a countdown. */
-class NextEventTileService : TileService() {
+/**
+ * "+$42.30 today ▲" — the day-change headline, green for gains / red for
+ * losses (money-semantic palette). Snapshot cache only, never blocks.
+ */
+class PortfolioTileService : TileService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onTileRequest(
         requestParams: RequestBuilders.TileRequest,
     ): ListenableFuture<TileBuilders.Tile> = scope.future {
-        val now = Clock.System.now()
-        val next = (applicationContext.wearServices.eventRepo.activeEvents() as? GuardianResult.Ok)
-            ?.value
-            ?.filter { it.startAt != null && it.startAt!! >= now }
-            ?.minByOrNull { it.startAt!! }
-
-        val (title, countdown) = if (next?.startAt != null) {
-            val minutes = (next.startAt!! - now).inWholeMinutes.coerceAtLeast(0)
-            next.title to when {
-                minutes < 60 -> "in ${minutes}m"
-                minutes < 24 * 60 -> "in ${minutes / 60}h ${minutes % 60}m"
-                else -> "in ${minutes / (24 * 60)}d"
+        val snapshot = applicationContext.wearServices.snapshots
+            .read(SyncProtocol.DATA_PORTFOLIO)
+            ?.let { stored ->
+                runCatching {
+                    SyncProtocol.json.decodeFromString(PortfolioSnapshot.serializer(), stored.json)
+                }.getOrNull()
             }
-        } else {
-            "All clear" to "nothing scheduled"
+
+        val headline = snapshot?.let { signedUsd(it.dayChangeUsd) } ?: "—"
+        val headlineColor = when {
+            snapshot == null -> FurlPayColors.ON_SURFACE_VARIANT_ARGB
+            snapshot.dayChangeUsd >= 0 -> FurlPayColors.MONEY_POSITIVE_ARGB
+            else -> FurlPayColors.ERROR_ARGB
         }
+        val caption = snapshot?.topMoverSymbol?.let { symbol ->
+            "$symbol ${signedPct(snapshot.topMoverPct ?: 0.0)}"
+        } ?: "Portfolio"
 
         TileBuilders.Tile.Builder()
             .setResourcesVersion(RESOURCES_VERSION)
-            .setFreshnessIntervalMillis(15L * 60 * 1000)
+            .setFreshnessIntervalMillis(30L * 60 * 1000)
             .setTileTimeline(
-                TimelineBuilders.Timeline.fromLayoutElement(layout(title, countdown)),
+                TimelineBuilders.Timeline.fromLayoutElement(layout(caption, headline, headlineColor)),
             )
             .build()
     }
@@ -62,13 +68,17 @@ class NextEventTileService : TileService() {
         ResourceBuilders.Resources.Builder().setVersion(RESOURCES_VERSION).build()
     }
 
-    private fun layout(title: String, countdown: String): LayoutElementBuilders.LayoutElement =
+    private fun layout(
+        caption: String,
+        headline: String,
+        headlineColor: Int,
+    ): LayoutElementBuilders.LayoutElement =
         LayoutElementBuilders.Column.Builder()
             .setModifiers(
                 ModifiersBuilders.Modifiers.Builder()
                     .setClickable(
                         ModifiersBuilders.Clickable.Builder()
-                            .setId("open-events")
+                            .setId("open-portfolio")
                             .setOnClick(
                                 ActionBuilders.LaunchAction.Builder()
                                     .setAndroidActivity(
@@ -84,16 +94,15 @@ class NextEventTileService : TileService() {
                     .build(),
             )
             .addContent(
-                Text.Builder(this, title)
-                    .setTypography(Typography.TYPOGRAPHY_TITLE3)
-                    .setColor(argb(ON_SURFACE))
-                    .setMaxLines(2)
+                Text.Builder(this, caption)
+                    .setTypography(Typography.TYPOGRAPHY_CAPTION1)
+                    .setColor(argb(FurlPayColors.ON_SURFACE_VARIANT_ARGB))
                     .build(),
             )
             .addContent(
-                Text.Builder(this, countdown)
-                    .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                    .setColor(argb(PRIMARY))
+                Text.Builder(this, headline)
+                    .setTypography(Typography.TYPOGRAPHY_DISPLAY3)
+                    .setColor(argb(headlineColor))
                     .build(),
             )
             .build()
@@ -105,7 +114,5 @@ class NextEventTileService : TileService() {
 
     companion object {
         private const val RESOURCES_VERSION = "1"
-        private const val PRIMARY = FurlPayColors.PRIMARY_ARGB
-        private const val ON_SURFACE = FurlPayColors.ON_SURFACE_ARGB
     }
 }
