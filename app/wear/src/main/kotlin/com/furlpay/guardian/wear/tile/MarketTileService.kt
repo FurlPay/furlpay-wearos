@@ -9,11 +9,11 @@ import androidx.wear.protolayout.material.Typography
 import androidx.wear.tiles.RequestBuilders
 import androidx.wear.tiles.TileBuilders
 import androidx.wear.tiles.TileService
-import com.furlpay.guardian.sync.PortfolioSnapshot
+import com.furlpay.guardian.sync.MarketSnapshot
 import com.furlpay.guardian.sync.SyncProtocol
 import com.furlpay.guardian.wear.Routes
+import com.furlpay.guardian.wear.ui.compactUsd
 import com.furlpay.guardian.wear.ui.signedPct
-import com.furlpay.guardian.wear.ui.signedUsd
 import com.furlpay.guardian.wear.ui.theme.FurlPayColors
 import com.furlpay.guardian.wear.wearServices
 import com.google.common.util.concurrent.ListenableFuture
@@ -23,11 +23,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.guava.future
 
-/**
- * "+$42.30 today ▲" — the day-change headline, green for gains / red for
- * losses (money-semantic palette). Snapshot cache only, never blocks.
- */
-class PortfolioTileService : TileService() {
+/** "BTC $68,421 ▼2.1%" — headline crypto quote from the market snapshot. */
+class MarketTileService : TileService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -35,28 +32,47 @@ class PortfolioTileService : TileService() {
         requestParams: RequestBuilders.TileRequest,
     ): ListenableFuture<TileBuilders.Tile> = scope.future {
         val snapshot = applicationContext.wearServices.snapshots
-            .read(SyncProtocol.DATA_PORTFOLIO)
+            .read(SyncProtocol.DATA_MARKET)
             ?.let { stored ->
                 runCatching {
-                    SyncProtocol.json.decodeFromString(PortfolioSnapshot.serializer(), stored.json)
+                    SyncProtocol.json.decodeFromString(MarketSnapshot.serializer(), stored.json)
                 }.getOrNull()
             }
 
-        val headline = snapshot?.let { signedUsd(it.dayChangeUsd) } ?: "—"
+        val lead = snapshot?.items?.firstOrNull()
+        val headline = lead?.let { "${it.symbol} ${compactUsd(it.price)}" } ?: "—"
+        val caption = lead?.let { item ->
+            val rest = snapshot.items.drop(1).joinToString(" · ") { it.symbol + " " + signedPct(it.changePct) }
+            signedPct(item.changePct) + if (rest.isNotEmpty()) " · $rest" else ""
+        } ?: "Markets"
         val headlineColor = when {
-            snapshot == null -> FurlPayColors.ON_SURFACE_VARIANT_ARGB
-            snapshot.dayChangeUsd >= 0 -> FurlPayColors.MONEY_POSITIVE_ARGB
+            lead == null -> FurlPayColors.ON_SURFACE_VARIANT_ARGB
+            lead.changePct >= 0 -> FurlPayColors.MONEY_POSITIVE_ARGB
             else -> FurlPayColors.ERROR_ARGB
         }
-        val caption = snapshot?.topMoverSymbol?.let { symbol ->
-            "$symbol ${signedPct(snapshot.topMoverPct ?: 0.0)}"
-        } ?: "Portfolio"
 
         TileBuilders.Tile.Builder()
             .setResourcesVersion(RESOURCES_VERSION)
-            .setFreshnessIntervalMillis(30L * 60 * 1000)
+            .setFreshnessIntervalMillis(15L * 60 * 1000)
             .setTileTimeline(
-                TimelineBuilders.Timeline.fromLayoutElement(layout(caption, headline, headlineColor)),
+                TimelineBuilders.Timeline.fromLayoutElement(
+                    LayoutElementBuilders.Column.Builder()
+                        .setModifiers(openRouteModifier(packageName, "open-market", Routes.PORTFOLIO))
+                        .addContent(
+                            Text.Builder(this@MarketTileService, headline)
+                                .setTypography(Typography.TYPOGRAPHY_TITLE2)
+                                .setColor(argb(headlineColor))
+                                .build(),
+                        )
+                        .addContent(
+                            Text.Builder(this@MarketTileService, caption)
+                                .setTypography(Typography.TYPOGRAPHY_CAPTION1)
+                                .setColor(argb(FurlPayColors.ON_SURFACE_VARIANT_ARGB))
+                                .setMaxLines(2)
+                                .build(),
+                        )
+                        .build(),
+                ),
             )
             .build()
     }
@@ -66,27 +82,6 @@ class PortfolioTileService : TileService() {
     ): ListenableFuture<ResourceBuilders.Resources> = scope.future {
         ResourceBuilders.Resources.Builder().setVersion(RESOURCES_VERSION).build()
     }
-
-    private fun layout(
-        caption: String,
-        headline: String,
-        headlineColor: Int,
-    ): LayoutElementBuilders.LayoutElement =
-        LayoutElementBuilders.Column.Builder()
-            .setModifiers(openRouteModifier(packageName, "open-portfolio", Routes.PORTFOLIO))
-            .addContent(
-                Text.Builder(this, caption)
-                    .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                    .setColor(argb(FurlPayColors.ON_SURFACE_VARIANT_ARGB))
-                    .build(),
-            )
-            .addContent(
-                Text.Builder(this, headline)
-                    .setTypography(Typography.TYPOGRAPHY_DISPLAY3)
-                    .setColor(argb(headlineColor))
-                    .build(),
-            )
-            .build()
 
     override fun onDestroy() {
         super.onDestroy()
